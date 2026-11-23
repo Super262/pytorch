@@ -13212,7 +13212,9 @@ class Scheduler:
             # context even when their metadata has a pool.
             if not isinstance(node, NopKernelSchedulerNode):
                 node_mempool = self.node_to_mempool.get(node)
-            if node_mempool is not None:
+            # The caller scopes the entire subgraph invocation, including wrapper
+            # allocations. Only enter a pool selected inside the subgraph itself.
+            if node_mempool is not None and node_mempool != V.graph.inherited_mempool:
                 # Flush any previously queued wrapper code before entering a pool
                 # that only applies to the current scheduler node. If a stream
                 # context from the previous node is still open, close it first so

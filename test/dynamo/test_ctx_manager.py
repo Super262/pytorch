@@ -2609,6 +2609,73 @@ class CUDACtxManagerTests(torch._dynamo.test_case.TestCase):
         self.assertEqual(outer_pool.use_count(), 1)
         self.assertEqual(inner_pool.use_count(), 1)
 
+    def _assert_tensor_in_pool(self, tensor, pool):
+        self.assertIn(
+            tensor.data_ptr(),
+            [
+                block["address"]
+                for segment in pool.snapshot(include_traces=False)
+                for block in segment["blocks"]
+                if block["state"] == "active_allocated"
+            ],
+        )
+
+    @requires_cuda_and_triton
+    def test_cuda_use_mem_pool_cond_inductor(self):
+        outer, inner = torch.cuda.MemPool(), torch.cuda.MemPool()
+
+        def true_fn(x):
+            with torch.cuda.use_mem_pool(inner):
+                return x.sin()
+
+        @torch.compile(backend="inductor", fullgraph=True)
+        def fn(pred, x):
+            with torch.cuda.use_mem_pool(outer):
+                return torch.cond(pred, true_fn, lambda t: t.cos(), (x,))
+
+        x = torch.randn(16, device="cuda")
+        for pred, expected, pool in ((False, x.cos(), outer), (True, x.sin(), inner)):
+            result = fn(torch.tensor(pred, device="cuda"), x)
+            self.assertEqual(result, expected)
+            self._assert_tensor_in_pool(result, pool)
+
+    @requires_cuda_and_triton
+    def test_cuda_use_mem_pool_while_loop_inductor(self):
+        pool = torch.cuda.MemPool()
+
+        @torch.compile(backend="inductor", fullgraph=True)
+        def fn(i, x):
+            with torch.cuda.use_mem_pool(pool):
+                return torch.while_loop(
+                    lambda i, x: i > 0, lambda i, x: (i - 1, x + 1), (i, x)
+                )[1]
+
+        x = torch.randn(16, device="cuda")
+        for steps in (0, 2):
+            result = fn(torch.tensor(steps, device="cuda"), x)
+            self.assertEqual(result, x + steps)
+            self._assert_tensor_in_pool(result, pool)
+
+    @requires_cuda_and_triton
+    def test_cuda_use_mem_pool_reused_subgraph_inductor(self):
+        first, second = torch.cuda.MemPool(), torch.cuda.MemPool()
+
+        @torch.compiler.nested_compile_region
+        def region(x):
+            return x.sin()
+
+        @torch.compile(backend="inductor", fullgraph=True)
+        def fn(x):
+            with torch.cuda.use_mem_pool(first):
+                region(x)  # Trace the body here, but eliminate the unused call.
+            with torch.cuda.use_mem_pool(second):
+                return region(region(x))
+
+        x = torch.randn(16, device="cuda")
+        result = fn(x)
+        self.assertEqual(result, x.sin().sin())
+        self._assert_tensor_in_pool(result, second)
+
     @requires_cuda_and_triton
     def test_cuda_use_mem_pool_distinct_pools_not_cse_inductor(self):
         torch.cuda.empty_cache()

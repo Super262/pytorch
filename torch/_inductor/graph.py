@@ -554,6 +554,7 @@ class GraphLowering(torch.fx.Interpreter):
         )
 
         self.current_node: torch.fx.Node = None  # type: ignore[assignment]
+        self.inherited_mempool: tuple[int, int] | None = None
         self.lists: dict[str, list[str]] = {}
         self.mutated_inputs: OrderedSet[str] = OrderedSet()
         self.mutated_input_idxs: list[int] = []
@@ -3339,6 +3340,12 @@ class SubgraphLowering(GraphLowering):
     def __init__(self, parent: GraphLowering, *args: Any, **kwargs: Any) -> None:
         self.parent = parent
         super().__init__(*args, **kwargs)
+        # The FX output is emitted after tracing the body, outside any pool
+        # entered inside it. This captures the ambient pool even if the first
+        # call to a reused subgraph is later eliminated.
+        self.inherited_mempool = self._get_node_mempool(self.graph.output_node())
+        if self.inherited_mempool is None and parent.current_node is not None:
+            self.inherited_mempool = self._get_node_mempool(parent.current_node)
         # Donation indices use the parent graph's placeholder ordering, not ours.
         self.bw_donated_idxs = None
 
